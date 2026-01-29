@@ -20,6 +20,10 @@
 ## 安装
 
 ```bash
+# Clawdbot
+clawdbot plugins install @moltbot-china/dingtalk
+
+# 或 Moltbot
 moltbot plugins install @moltbot-china/dingtalk
 ```
 
@@ -28,19 +32,19 @@ moltbot plugins install @moltbot-china/dingtalk
 > 📖 **[钉钉企业注册指南](doc/guides/dingtalk/configuration.md)** — 无需任何材料，最快 5 分钟完成配置
 
 
-在 Moltbot 配置文件 `/root/.clawdbot/clawdbot.json` 中添加钉钉渠道配置：
+### 配置
+
+编辑 `~/.clawdbot/clawdbot.json`（或 `~/.moltbot/moltbot.json`），添加钉钉渠道配置：
+
 ```json5
 {
-  "session": {
-    "dmScope": "per-peer"
-  },
   "channels": {
     "dingtalk": {
       "enabled": true,
-      "clientId": "YOUR_APP_KEY",
-      "clientSecret": "YOUR_APP_SECRET",
+      "clientId": "dingxxxxxx",
+      "clientSecret": "your-app-secret",
       "dmPolicy": "pairing",
-      "groupPolicy": "allowlist",
+      "groupPolicy": "open",
       "requireMention": true,
       "allowFrom": [],
       "groupAllowFrom": []
@@ -49,9 +53,11 @@ moltbot plugins install @moltbot-china/dingtalk
 }
 ```
 
-### 重启 Gateway
+### 4. 重启 Gateway
 
 ```bash
+clawdbot gateway restart
+# 或
 moltbot gateway restart
 ```
 
@@ -78,6 +84,7 @@ moltbot gateway restart
 | `main` | 所有用户共享同一会话（不推荐） |
 | `per-peer` | **推荐**，按用户 ID 隔离 |
 | `per-channel-peer` | 按渠道+用户隔离 |
+
 
 
 ## 开发

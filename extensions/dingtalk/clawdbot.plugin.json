@@ -2,7 +2,7 @@
   "id": "dingtalk",
   "name": "DingTalk",
   "description": "钉钉消息渠道插件",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "channels": ["dingtalk"],
   "configSchema": {
     "type": "object",

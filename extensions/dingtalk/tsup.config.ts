@@ -11,6 +11,6 @@ export default defineConfig({
   treeshake: true,
   outDir: "dist",
   tsconfig: "tsconfig.json",
-  noExternal: ["@moltbot-china/shared"],
-  external: ["dingtalk-stream", "zod"],
+  noExternal: ["@moltbot-china/shared", "zod"],
+  external: ["dingtalk-stream"],
 });
