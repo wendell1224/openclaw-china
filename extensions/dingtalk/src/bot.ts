@@ -9,13 +9,8 @@ import type { DingtalkConfig } from "./config.js";
 import { getDingtalkRuntime, isDingtalkRuntimeInitialized } from "./runtime.js";
 import { sendMessageDingtalk } from "./send.js";
 import { sendMediaDingtalk } from "./media.js";
-import {
-  createLogger,
-  type Logger,
-  checkDmPolicy,
-  checkGroupPolicy,
-  type PolicyCheckResult,
-} from "@openclaw-china/shared";
+import { createAICard, streamAICard, finishAICard, type AICardInstance } from "./card.js";
+import { createLogger, type Logger, checkDmPolicy, checkGroupPolicy } from "@openclaw-china/shared";
 
 /**
  * 解析钉钉原始消息为标准化的消息上下文
@@ -169,6 +164,163 @@ export function buildInboundContext(
 }
 
 /**
+ * 处理 AI Card 流式响应
+ * 
+ * 通过 Moltbot 核心 API 获取 LLM 响应，并流式更新 AI Card
+ * 
+ * @param params 处理参数
+ * @returns Promise<void>
+ */
+async function handleAICardStreaming(params: {
+  card: AICardInstance;
+  cfg: unknown;
+  route: { sessionKey: string; accountId: string; agentId?: string };
+  inboundCtx: InboundContext;
+  dingtalkCfg: DingtalkConfig;
+  targetId: string;
+  chatType: "direct" | "group";
+  logger: Logger;
+}): Promise<void> {
+  const { card, cfg, route, inboundCtx, dingtalkCfg, targetId, chatType, logger } = params;
+  let accumulated = "";
+
+  try {
+    const core = getDingtalkRuntime();
+    let lastUpdateTime = 0;
+    const updateInterval = 300; // 最小更新间隔 ms
+
+    // 创建回复分发器
+    const coreChannel = (core as Record<string, unknown>)?.channel as Record<string, unknown> | undefined;
+    const replyApi = coreChannel?.reply as Record<string, unknown> | undefined;
+
+    const humanDelay = (replyApi?.resolveHumanDelayConfig as ((cfg: unknown, agentId?: string) => unknown) | undefined)?.(
+      cfg,
+      route.agentId
+    );
+
+    const createDispatcherWithTyping = replyApi?.createReplyDispatcherWithTyping as
+      | ((opts: Record<string, unknown>) => Record<string, unknown>)
+      | undefined;
+    const createDispatcher = replyApi?.createReplyDispatcher as
+      | ((opts: Record<string, unknown>) => Record<string, unknown>)
+      | undefined;
+
+    const dispatcherResult = createDispatcherWithTyping
+      ? createDispatcherWithTyping({
+          deliver: async (payload: unknown) => {
+            let text = "";
+            if (typeof payload === "object" && payload !== null && "text" in payload) {
+              const textValue = (payload as Record<string, unknown>)["text"];
+              text = typeof textValue === "string" ? textValue : "";
+            }
+            if (!text.trim()) return;
+
+            accumulated += text;
+
+            // 节流更新，避免过于频繁
+            const now = Date.now();
+            if (now - lastUpdateTime >= updateInterval) {
+              await streamAICard(card, accumulated, false, (msg) => logger.debug(msg));
+              lastUpdateTime = now;
+            }
+          },
+          humanDelay,
+          onError: (err: unknown, info: { kind: string }) => {
+            logger.error(`${info.kind} reply failed: ${String(err)}`);
+          },
+        })
+      : {
+          dispatcher: createDispatcher?.({
+            deliver: async (payload: unknown) => {
+              let text = "";
+              if (typeof payload === "object" && payload !== null && "text" in payload) {
+                const textValue = (payload as Record<string, unknown>)["text"];
+                text = typeof textValue === "string" ? textValue : "";
+              }
+              if (!text.trim()) return;
+
+              accumulated += text;
+
+              const now = Date.now();
+              if (now - lastUpdateTime >= updateInterval) {
+                await streamAICard(card, accumulated, false, (msg) => logger.debug(msg));
+                lastUpdateTime = now;
+              }
+            },
+            humanDelay,
+            onError: (err: unknown, info: { kind: string }) => {
+              logger.error(`${info.kind} reply failed: ${String(err)}`);
+            },
+          }),
+          replyOptions: {},
+          markDispatchIdle: () => undefined,
+        };
+
+    const dispatcher = (dispatcherResult as Record<string, unknown>)?.dispatcher as Record<string, unknown> | undefined;
+    if (!dispatcher) {
+      logger.debug("dispatcher not available");
+      return;
+    }
+
+    // 分发消息
+    const dispatchReplyFromConfig = replyApi?.dispatchReplyFromConfig as
+      | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
+      | undefined;
+
+    if (!dispatchReplyFromConfig) {
+      logger.debug("dispatchReplyFromConfig not available");
+      return;
+    }
+
+    const result = await dispatchReplyFromConfig({
+      ctx: inboundCtx,
+      cfg,
+      dispatcher,
+      replyOptions: (dispatcherResult as Record<string, unknown>)?.replyOptions ?? {},
+    });
+
+    const markDispatchIdle = (dispatcherResult as Record<string, unknown>)?.markDispatchIdle as (() => void) | undefined;
+    markDispatchIdle?.();
+
+    const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
+    logger.debug(`dispatch complete (replies=${counts?.final ?? 0})`);
+
+    // 完成卡片
+    await finishAICard(card, accumulated, (msg) => logger.debug(msg));
+    logger.info(`AI Card streaming completed with ${accumulated.length} chars`);
+  } catch (err) {
+    logger.error(`AI Card streaming failed: ${String(err)}`);
+    // 尝试用错误信息完成卡片
+    try {
+      const errorMsg = `⚠️ Response interrupted: ${String(err)}`;
+      await finishAICard(card, errorMsg, (msg) => logger.debug(msg));
+    } catch (finishErr) {
+      logger.error(`Failed to finish card with error: ${String(finishErr)}`);
+    }
+
+    // 回退到普通消息发送（使用钉钉 SDK）
+    try {
+      const fallbackText = accumulated.trim()
+        ? accumulated
+        : `⚠️ Response interrupted: ${String(err)}`;
+      const limit = dingtalkCfg.textChunkLimit ?? 4000;
+      for (let i = 0; i < fallbackText.length; i += limit) {
+        const chunk = fallbackText.slice(i, i + limit);
+        await sendMessageDingtalk({
+          cfg: dingtalkCfg,
+          to: targetId,
+          text: chunk,
+          chatType,
+        });
+      }
+      logger.info("AI Card failed; fallback message sent via SDK");
+    } catch (fallbackErr) {
+      logger.error(`Failed to send fallback message: ${String(fallbackErr)}`);
+    }
+  }
+}
+
+/**
  * 处理钉钉入站消息
  * 
  * 集成消息解析、策略检查和 Agent 分发
@@ -184,11 +336,13 @@ export async function handleDingtalkMessage(params: {
   accountId?: string;
   log?: (msg: string) => void;
   error?: (msg: string) => void;
+  enableAICard?: boolean;
 }): Promise<void> {
   const {
     cfg,
     raw,
     accountId = "default",
+    enableAICard = false,
   } = params;
   
   // 创建日志器
@@ -250,25 +404,30 @@ export async function handleDingtalkMessage(params: {
   try {
     // 获取完整的 Moltbot 运行时（包含 core API）
     const core = getDingtalkRuntime();
+    const coreRecord = core as Record<string, unknown>;
+    const coreChannel = coreRecord?.channel as Record<string, unknown> | undefined;
+    const replyApi = coreChannel?.reply as Record<string, unknown> | undefined;
+    const routingApi = coreChannel?.routing as Record<string, unknown> | undefined;
     
     // 检查必要的 API 是否存在
-    if (!core.channel?.routing?.resolveAgentRoute) {
+    if (!routingApi?.resolveAgentRoute) {
       logger.debug("core.channel.routing.resolveAgentRoute not available, skipping dispatch");
       return;
     }
     
-    if (!core.channel?.reply?.dispatchReplyFromConfig) {
+    if (!replyApi?.dispatchReplyFromConfig) {
       logger.debug("core.channel.reply.dispatchReplyFromConfig not available, skipping dispatch");
       return;
     }
 
-    if (!core.channel?.reply?.createReplyDispatcher && !core.channel?.reply?.createReplyDispatcherWithTyping) {
+    if (!replyApi?.createReplyDispatcher && !replyApi?.createReplyDispatcherWithTyping) {
       logger.debug("core.channel.reply dispatcher factory not available, skipping dispatch");
       return;
     }
     
     // 解析路由
-    const route = core.channel.routing.resolveAgentRoute({
+    const resolveAgentRoute = routingApi.resolveAgentRoute as (opts: Record<string, unknown>) => Record<string, unknown>;
+    const route = resolveAgentRoute({
       cfg,
       channel: "dingtalk",
       peer: {
@@ -278,29 +437,59 @@ export async function handleDingtalkMessage(params: {
     });
     
     // 构建入站上下文
-    const inboundCtx = buildInboundContext(ctx, route.sessionKey, route.accountId);
+    const inboundCtx = buildInboundContext(ctx, (route as Record<string, unknown>)?.sessionKey as string, (route as Record<string, unknown>)?.accountId as string);
 
     // 如果有 finalizeInboundContext，使用它
-    const finalCtx = core.channel.reply.finalizeInboundContext
-      ? core.channel.reply.finalizeInboundContext(inboundCtx)
-      : inboundCtx;
+    const finalizeInboundContext = replyApi?.finalizeInboundContext as ((ctx: InboundContext) => InboundContext) | undefined;
+    const finalCtx = finalizeInboundContext ? finalizeInboundContext(inboundCtx) : inboundCtx;
 
-    const dingtalkCfg = channelCfg;
-    if (!dingtalkCfg) {
+    const dingtalkCfgResolved = channelCfg;
+    if (!dingtalkCfgResolved) {
       logger.warn("channel config missing, skipping dispatch");
       return;
     }
 
-    const textApi = core.channel?.text;
+    // ===== AI Card 流式处理 =====
+    if (enableAICard) {
+      const card = await createAICard({
+        cfg: dingtalkCfgResolved,
+        conversationType: ctx.chatType === "group" ? "2" : "1",
+        conversationId: ctx.conversationId,
+        senderId: ctx.senderId,
+        senderStaffId: raw.senderStaffId,
+        log: (msg) => logger.debug(msg),
+      });
+
+      if (card) {
+        logger.info("AI Card created, using streaming mode");
+        await handleAICardStreaming({
+          card,
+          cfg,
+          route: route as { sessionKey: string; accountId: string; agentId?: string },
+          inboundCtx: finalCtx,
+          dingtalkCfg: dingtalkCfgResolved,
+          targetId: isGroup ? ctx.conversationId : ctx.senderId,
+          chatType: isGroup ? "group" : "direct",
+          logger,
+        });
+        return;
+      } else {
+        logger.warn("AI Card creation failed, falling back to normal message");
+      }
+    }
+
+    // ===== 普通消息模式 =====
+    const textApi = coreChannel?.text as Record<string, unknown> | undefined;
     
-    const textChunkLimit =
-      textApi?.resolveTextChunkLimit?.({
-        cfg,
-        channel: "dingtalk",
-        defaultLimit: dingtalkCfg.textChunkLimit ?? 4000,
-      }) ?? (dingtalkCfg.textChunkLimit ?? 4000);
-    const chunkMode = textApi?.resolveChunkMode?.(cfg, "dingtalk");
-    // 钉钉不支持 Markdown 表格和代码块，强制使用 bullets 模式转换为列表
+    const textChunkLimitResolved =
+      (textApi?.resolveTextChunkLimit as ((opts: Record<string, unknown>) => number) | undefined)?.(
+        {
+          cfg,
+          channel: "dingtalk",
+          defaultLimit: dingtalkCfgResolved.textChunkLimit ?? 4000,
+        }
+      ) ?? (dingtalkCfgResolved.textChunkLimit ?? 4000);
+    const chunkMode = (textApi?.resolveChunkMode as ((cfg: unknown, channel: string) => unknown) | undefined)?.(cfg, "dingtalk");
     const tableMode = "bullets";
 
     const deliver = async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
@@ -311,7 +500,7 @@ export async function handleDingtalkMessage(params: {
       if (mediaUrls.length > 0) {
         for (const mediaUrl of mediaUrls) {
           await sendMediaDingtalk({
-            cfg: dingtalkCfg,
+            cfg: dingtalkCfgResolved,
             to: targetId,
             mediaUrl,
             chatType,
@@ -323,19 +512,19 @@ export async function handleDingtalkMessage(params: {
       const rawText = payload.text ?? "";
       if (!rawText.trim()) return;
       
-      // 转换表格：使用 Moltbot 核心的转换，不可用时直接用原始文本
-      const converted = textApi?.convertMarkdownTables
-        ? textApi.convertMarkdownTables(rawText, tableMode)
-        : rawText;
+      const converted = (textApi?.convertMarkdownTables as ((text: string, mode: string) => string) | undefined)?.(
+        rawText,
+        tableMode
+      ) ?? rawText;
       
       const chunks =
-        textApi?.chunkTextWithMode && typeof textChunkLimit === "number" && textChunkLimit > 0
-          ? textApi.chunkTextWithMode(converted, textChunkLimit, chunkMode)
+        textApi?.chunkTextWithMode && typeof textChunkLimitResolved === "number" && textChunkLimitResolved > 0
+          ? (textApi.chunkTextWithMode as (text: string, limit: number, mode: unknown) => string[])(converted, textChunkLimitResolved, chunkMode)
           : [converted];
 
       for (const chunk of chunks) {
         await sendMessageDingtalk({
-          cfg: dingtalkCfg,
+          cfg: dingtalkCfgResolved,
           to: targetId,
           text: chunk,
           chatType,
@@ -343,12 +532,20 @@ export async function handleDingtalkMessage(params: {
       }
     };
 
-    const humanDelay = core.channel.reply.resolveHumanDelayConfig
-      ? core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId)
-      : undefined;
+    const humanDelay = (replyApi?.resolveHumanDelayConfig as ((cfg: unknown, agentId?: string) => unknown) | undefined)?.(
+      cfg,
+      (route as Record<string, unknown>)?.agentId as string | undefined
+    );
 
-    const dispatcherResult = core.channel.reply.createReplyDispatcherWithTyping
-      ? core.channel.reply.createReplyDispatcherWithTyping({
+    const createDispatcherWithTyping = replyApi?.createReplyDispatcherWithTyping as
+      | ((opts: Record<string, unknown>) => Record<string, unknown>)
+      | undefined;
+    const createDispatcher = replyApi?.createReplyDispatcher as
+      | ((opts: Record<string, unknown>) => Record<string, unknown>)
+      | undefined;
+
+    const dispatcherResult = createDispatcherWithTyping
+      ? createDispatcherWithTyping({
           deliver: async (payload: unknown) => {
             await deliver(payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] });
           },
@@ -358,7 +555,7 @@ export async function handleDingtalkMessage(params: {
           },
         })
       : {
-          dispatcher: core.channel.reply.createReplyDispatcher?.({
+          dispatcher: createDispatcher?.({
             deliver: async (payload: unknown) => {
               await deliver(payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] });
             },
@@ -371,24 +568,36 @@ export async function handleDingtalkMessage(params: {
           markDispatchIdle: () => undefined,
         };
 
-    if (!dispatcherResult.dispatcher) {
+    const dispatcher = (dispatcherResult as Record<string, unknown>)?.dispatcher as Record<string, unknown> | undefined;
+    if (!dispatcher) {
       logger.debug("dispatcher not available, skipping dispatch");
       return;
     }
 
-    logger.debug(`dispatching to agent (session=${route.sessionKey})`);
+    logger.debug(`dispatching to agent (session=${(route as Record<string, unknown>)?.sessionKey})`);
 
     // 分发消息
-    const { queuedFinal, counts } = await core.channel.reply.dispatchReplyFromConfig({
+    const dispatchReplyFromConfig = replyApi?.dispatchReplyFromConfig as
+      | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
+      | undefined;
+
+    if (!dispatchReplyFromConfig) {
+      logger.debug("dispatchReplyFromConfig not available");
+      return;
+    }
+
+    const result = await dispatchReplyFromConfig({
       ctx: finalCtx,
       cfg,
-      dispatcher: dispatcherResult.dispatcher,
-      replyOptions: dispatcherResult.replyOptions,
+      dispatcher,
+      replyOptions: (dispatcherResult as Record<string, unknown>)?.replyOptions ?? {},
     });
 
-    dispatcherResult.markDispatchIdle?.();
+    const markDispatchIdle = (dispatcherResult as Record<string, unknown>)?.markDispatchIdle as (() => void) | undefined;
+    markDispatchIdle?.();
 
-    logger.debug(`dispatch complete (queuedFinal=${queuedFinal}, replies=${counts.final})`);
+    const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
+    logger.debug(`dispatch complete (replies=${counts?.final ?? 0})`);
   } catch (err) {
     logger.error(`failed to dispatch message: ${String(err)}`);
   }

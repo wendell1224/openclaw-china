@@ -121,6 +121,7 @@ export const dingtalkPlugin = {
         groupAllowFrom: { type: "array", items: { type: "string" } },
         historyLimit: { type: "integer", minimum: 0 },
         textChunkLimit: { type: "integer", minimum: 1 },
+        enableAICard: { type: "boolean" },
       },
     },
   },

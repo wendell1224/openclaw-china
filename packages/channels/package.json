@@ -6,6 +6,7 @@
   "license": "MIT",
   "files": [
     "dist",
+    "openclaw.plugin.json",
     "moltbot.plugin.json",
     "clawdbot.plugin.json"
   ],
@@ -15,6 +16,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "npmSpec": "@openclaw-china/channels",
+      "localPath": ".",
+      "defaultChoice": "npm"
     }
   },
   "moltbot": {
