@@ -9,6 +9,29 @@
     "moltbot.plugin.json",
     "clawdbot.plugin.json"
   ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "wecom",
+      "label": "WeCom",
+      "selectionLabel": "WeCom (企业微信)",
+      "docsPath": "/channels/wecom",
+      "blurb": "企业微信智能机器人回调",
+      "aliases": [
+        "wechatwork",
+        "wework",
+        "qywx"
+      ],
+      "order": 85
+    },
+    "install": {
+      "npmSpec": "@openclaw-china/wecom",
+      "localPath": ".",
+      "defaultChoice": "npm"
+    }
+  },
   "moltbot": {
     "extensions": [
       "./dist/index.js"

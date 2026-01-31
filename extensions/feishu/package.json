@@ -9,6 +9,27 @@
     "moltbot.plugin.json",
     "clawdbot.plugin.json"
   ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "feishu",
+      "label": "Feishu",
+      "selectionLabel": "Feishu/Lark (飞书)",
+      "docsPath": "/channels/feishu",
+      "blurb": "飞书/Lark 企业消息",
+      "aliases": [
+        "lark"
+      ],
+      "order": 70
+    },
+    "install": {
+      "npmSpec": "@openclaw-china/feishu",
+      "localPath": ".",
+      "defaultChoice": "npm"
+    }
+  },
   "moltbot": {
     "extensions": [
       "./dist/index.js"

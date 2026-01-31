@@ -9,6 +9,27 @@
     "moltbot.plugin.json",
     "clawdbot.plugin.json"
   ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "dingtalk",
+      "label": "DingTalk",
+      "selectionLabel": "DingTalk (钉钉)",
+      "docsPath": "/channels/dingtalk",
+      "blurb": "钉钉企业消息",
+      "aliases": [
+        "ding"
+      ],
+      "order": 71
+    },
+    "install": {
+      "npmSpec": "@openclaw-china/dingtalk",
+      "localPath": ".",
+      "defaultChoice": "npm"
+    }
+  },
   "moltbot": {
     "extensions": [
       "./dist/index.js"
