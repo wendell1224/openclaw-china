@@ -21,7 +21,7 @@
 | 文本消息 | ✅ | ✅ | ✅ |
 | Markdown | ✅ | ✅ | ✅ |
 | 流式响应 | ✅ | 🚧 开发中 | ✅ stream 回调 |
-| 图片/文件 | ✅ 仅接收（发送开发中） | 🚧 开发中 | ✅ 仅接收 |
+| 图片/文件 | ✅  | 🚧 开发中 | ✅ 仅接收 |
 | 语音消息 | ✅ 收发（接收为语音文本） | 🚧 开发中 | ✅ 仅接收（语音文本） |
 | 私聊 | ✅ | ✅ | ✅ |
 | 群聊 | ✅ | ✅ | ✅ |
@@ -63,6 +63,12 @@ openclaw plugins install @openclaw-china/feishu
 openclaw plugins install @openclaw-china/wecom
 ```
 
+#### 更新插件
+
+```bash
+openclaw plugins update @openclaw-china/channels
+```
+
 
 #### 方式二：从源码安装（全平台通用）
 
@@ -75,6 +81,16 @@ pnpm install
 pnpm build
 openclaw plugins install -l ./packages/channels
 ```
+
+#### 更新源码
+
+```bash
+git pull origin main
+pnpm install
+pnpm build
+```
+
+> 链接模式下构建后即生效，重启 Gateway 即可。
 
 > ℹ️ 如果你使用的是旧名称 **clawbot**，请使用 `@openclaw-china/channels@0.1.12`。
 
