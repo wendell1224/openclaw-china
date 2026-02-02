@@ -83,7 +83,15 @@ export type {
   FeishuSendResult,
 } from "@openclaw-china/feishu";
 export type { WecomConfig, ResolvedWecomAccount, WecomInboundMessage } from "@openclaw-china/wecom";
-export type { WecomAppConfig, ResolvedWecomAppAccount, WecomAppInboundMessage } from "@openclaw-china/wecom-app";
+export type {
+  WecomAppConfig,
+  ResolvedWecomAppAccount,
+  WecomAppInboundMessage,
+  WecomAppDmPolicy,
+  WecomAppGroupPolicy,
+  WecomAppSendTarget,
+  AccessTokenCacheEntry,
+} from "@openclaw-china/wecom-app";
 
 // TODO: 后续添加其他渠道
 // export { qqPlugin } from "@openclaw-china/qq";
