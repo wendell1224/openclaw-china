@@ -163,15 +163,46 @@ export const wecomAppPlugin = {
 
   /**
    * 目录解析 - 用于将 wecom-app:XXX 格式的 target 解析为可投递目标
+   *
+   * 支持的输入格式：
+   * - "wecom-app:user:xxx" → { channel: "wecom-app", to: "user:xxx" }
+   * - "wecom-app:group:xxx" → { channel: "wecom-app", to: "group:xxx" }
+   * - "wecom-app:xxx" → { channel: "wecom-app", to: "user:xxx" }
+   * - "user:xxx" → { channel: "wecom-app", to: "user:xxx" }
+   * - "group:xxx" → { channel: "wecom-app", to: "group:xxx" }
+   * - "xxx" (裸ID) → { channel: "wecom-app", to: "user:xxx" }
+   * - 带 accountId: "user:xxx@account1" → { channel: "wecom-app", accountId: "account1", to: "user:xxx" }
    */
   directory: {
     /**
-     * 解析目标地址
-     * 将 wecom-app:XXX 格式的 target 解析为可用的投递对象
+     * 检查此通道是否可以解析给定的目标格式
+     * 用于框架层判断是否调用 resolveTarget
+     */
+    canResolve: (params: { target: string }): boolean => {
+      const raw = (params.target ?? "").trim();
+      if (!raw) return false;
+
+      // 明确以 wecom-app: 开头的目标
+      if (raw.startsWith("wecom-app:")) return true;
+
+      // 不以其他 channel 前缀开头（如 dingtalk:, feishu: 等）
+      // 只接受 wecom-app 专有目标或裸 ID
+      const knownChannelPrefixes = ["dingtalk:", "feishu:", "wecom:", "qq:", "telegram:", "discord:", "slack:"];
+      for (const prefix of knownChannelPrefixes) {
+        if (raw.startsWith(prefix)) return false;
+      }
+
+      // user:/group: 前缀或裸 ID 都可以处理
+      return true;
+    },
+
+    /**
+     * 解析单个目标地址
+     * 将各种格式的 target 解析为可用的投递对象
      */
     resolveTarget: (params: {
       cfg: PluginConfig;
-      target: string; // e.g., "wecom-app:CaiHongYu" or "group:chat123" or "caihongyu"
+      target: string;
     }): {
       channel: string;
       accountId?: string;
@@ -179,28 +210,38 @@ export const wecomAppPlugin = {
     } | null => {
       // NOTE:
       // The OpenClaw message routing layer may pass targets in different shapes:
-      // - "wecom-app:<to>" (fully-qualified)
-      // - "<to>" when channel is already known (bare)
-      // We accept both to avoid "Unknown target" for media sends.
+      // - "wecom-app:user:xxx" or "wecom-app:group:xxx" (fully-qualified with type)
+      // - "wecom-app:xxx" (fully-qualified, default to user)
+      // - "user:xxx" or "group:xxx" (type-prefixed, bare)
+      // - "xxx" (bare ID, default to user)
+      // - "xxx@accountId" (with account selector)
+      // We accept all to avoid "Unknown target" for media sends.
 
-      let raw = params.target.trim();
+      let raw = (params.target ?? "").trim();
       if (!raw) return null;
 
-      const prefix = "wecom-app:";
-      if (raw.startsWith(prefix)) {
-        raw = raw.slice(prefix.length);
+      // 1. 剥离 channel 前缀 "wecom-app:"
+      const channelPrefix = "wecom-app:";
+      if (raw.startsWith(channelPrefix)) {
+        raw = raw.slice(channelPrefix.length);
       }
 
-      // 解析 accountId（如果包含 @ 符号）
+      // 2. 解析 accountId（如果末尾包含 @accountId）
       let accountId: string | undefined;
       let to = raw;
-      if (raw.includes("@")) {
-        const parts = raw.split("@");
-        to = parts[0]!;
-        accountId = parts[1];
+
+      // 只在末尾查找 @，避免误解析 email 格式
+      const atIdx = raw.lastIndexOf("@");
+      if (atIdx > 0 && atIdx < raw.length - 1) {
+        // 检查 @ 之后是否是有效的 accountId（不含 : 或 /）
+        const potentialAccountId = raw.slice(atIdx + 1);
+        if (!/[:/]/.test(potentialAccountId)) {
+          to = raw.slice(0, atIdx);
+          accountId = potentialAccountId;
+        }
       }
 
-      // 标准化目标格式
+      // 3. 标准化目标格式
       if (to.startsWith("group:")) {
         return { channel: "wecom-app", accountId, to };
       }
@@ -208,9 +249,53 @@ export const wecomAppPlugin = {
         return { channel: "wecom-app", accountId, to };
       }
 
-      // 默认为用户ID，添加 user: 前缀
+      // 4. 默认为用户ID，添加 user: 前缀
       return { channel: "wecom-app", accountId, to: `user:${to}` };
     },
+
+    /**
+     * 批量解析多个目标地址
+     * 用于框架层批量发送消息
+     */
+    resolveTargets: (params: {
+      cfg: PluginConfig;
+      targets: string[];
+    }): Array<{
+      channel: string;
+      accountId?: string;
+      to: string;
+    }> => {
+      const results: Array<{
+        channel: string;
+        accountId?: string;
+        to: string;
+      }> = [];
+
+      for (const target of params.targets) {
+        const resolved = wecomAppPlugin.directory.resolveTarget({
+          cfg: params.cfg,
+          target,
+        });
+        if (resolved) {
+          results.push(resolved);
+        }
+      }
+
+      return results;
+    },
+
+    /**
+     * 获取此通道支持的目标格式说明
+     * 用于帮助信息和错误提示
+     */
+    getTargetFormats: (): string[] => [
+      "wecom-app:user:<userId>",
+      "wecom-app:group:<chatId>",
+      "wecom-app:<userId>",
+      "user:<userId>",
+      "group:<chatId>",
+      "<userId>",
+    ],
   },
 
   /**
