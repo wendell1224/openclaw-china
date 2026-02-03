@@ -11,9 +11,9 @@
 | 钉钉 | ✅ 可用 |
 | 飞书 | ✅ 可用 |
 | 企业微信（智能机器人） | ✅ 可用 |
-| 企业微信（自建应用） | ✅ 可用 |
+| 企业微信（自建应用-可接入普通微信） | ✅ 可用 |
 | QQ 机器人 | 🚧 开发中 |
-| 微信 | PR 审查中 |
+
 
 ## 功能支持
 
@@ -21,7 +21,7 @@
 
 **【全网首发】钉钉支持文件接受和发送**
 
-| 功能 | 钉钉 | 飞书 | 企业微信智能机器人 | 企业微信自建应用 |
+| 功能 | 钉钉 | 飞书 | 企业微信智能机器人 | 企业微信自建应用（可接入普通微信） |
 |------|:----:|:----:|:------------------:|:----------------:|
 | 文本消息 | ✅ | ✅ | ✅ | ✅ |
 | Markdown | ✅ | ✅ | ✅ | ✅ |
@@ -145,42 +145,10 @@ openclaw config set channels.dingtalk.enableAICard true
 }
 ```
 
-#### 飞书
 
-> 飞书应用需开启机器人能力，并使用「长连接接收消息」模式
+#### 企业微信（自建应用-可接入微信）
 
-openclaw:
-
-```bash
-openclaw config set channels.feishu '{
-  "enabled": true,
-  "appId": "cli_xxxxxx",
-  "appSecret": "your-app-secret",
-  "sendMarkdownAsCard": true
-
-}' --json
-```
-
-#### 企业微信（智能机器人）
-
-> 企业微信智能机器人（API 模式）通过公网 HTTPS 回调接收消息，仅支持被动回复
-
-```bash
-openclaw config set channels.wecom '{
-  "enabled": true,
-  "webhookPath": "/wecom",
-  "token": "your-token",
-  "encodingAESKey": "your-43-char-encoding-aes-key"
-}' --json
-```
-
-**注意事项**
-
-- `webhookPath` 必须为公网 HTTPS 可访问路径（如 `https://your.domain/wecom`）
-- `encodingAESKey` 必须为 43 位字符
-- 如遇回调校验失败，先确认 Token/EncodingAESKey 与后台一致
-
-#### 企业微信（自建应用）
+由[@RainbowRain9 Cai Hongyu](https://github.com/RainbowRain9)提供
 
 > 📖 **[企业微信自建应用配置指南](doc/guides/wecom-app/configuration.md)** — 支持主动发送消息
 
@@ -220,10 +188,49 @@ openclaw config set channels.wecom-app.agentId 1000002
 | 需要 IP 白名单 | ❌ | ✅ |
 | 配置复杂度 | 简单 | 中等 |
 
-### 3) 重启 Gateway
+
+#### 企业微信（智能机器人）
+
+> 企业微信智能机器人（API 模式）通过公网 HTTPS 回调接收消息，仅支持被动回复
 
 ```bash
-openclaw gateway restart
+openclaw config set channels.wecom '{
+  "enabled": true,
+  "webhookPath": "/wecom",
+  "token": "your-token",
+  "encodingAESKey": "your-43-char-encoding-aes-key"
+}' --json
+```
+
+**注意事项**
+
+- `webhookPath` 必须为公网 HTTPS 可访问路径（如 `https://your.domain/wecom`）
+- `encodingAESKey` 必须为 43 位字符
+- 如遇回调校验失败，先确认 Token/EncodingAESKey 与后台一致
+
+
+
+#### 飞书
+
+> 飞书应用需开启机器人能力，并使用「长连接接收消息」模式
+
+openclaw:
+
+```bash
+openclaw config set channels.feishu '{
+  "enabled": true,
+  "appId": "cli_xxxxxx",
+  "appSecret": "your-app-secret",
+  "sendMarkdownAsCard": true
+
+}' --json
+```
+
+
+### 3) 调试模式启动
+
+```bash
+openclaw gateway --port 18789 --verbose
 ```
 
 ## 演示
