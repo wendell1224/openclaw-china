@@ -171,54 +171,45 @@ export const wecomAppPlugin = {
      */
     resolveTarget: (params: {
       cfg: PluginConfig;
-      target: string;  // e.g., "wecom-app:CaiHongYu" or "wecom-app:group:chat123"
+      target: string; // e.g., "wecom-app:CaiHongYu" or "group:chat123" or "caihongyu"
     }): {
       channel: string;
       accountId?: string;
       to: string;
     } | null => {
+      // NOTE:
+      // The OpenClaw message routing layer may pass targets in different shapes:
+      // - "wecom-app:<to>" (fully-qualified)
+      // - "<to>" when channel is already known (bare)
+      // We accept both to avoid "Unknown target" for media sends.
+
+      let raw = params.target.trim();
+      if (!raw) return null;
+
       const prefix = "wecom-app:";
-      
-      // 只处理 wecom-app: 开头的 target
-      if (!params.target.startsWith(prefix)) {
-        return null;
+      if (raw.startsWith(prefix)) {
+        raw = raw.slice(prefix.length);
       }
-      
-      const withoutPrefix = params.target.slice(prefix.length);
-      
+
       // 解析 accountId（如果包含 @ 符号）
       let accountId: string | undefined;
-      let to = withoutPrefix;
-      
-      if (withoutPrefix.includes("@")) {
-        const parts = withoutPrefix.split("@");
+      let to = raw;
+      if (raw.includes("@")) {
+        const parts = raw.split("@");
         to = parts[0]!;
         accountId = parts[1];
       }
-      
+
       // 标准化目标格式
       if (to.startsWith("group:")) {
-        // 群聊: group:xxx
-        return {
-          channel: "wecom-app",
-          accountId,
-          to,
-        };
-      } else if (to.startsWith("user:")) {
-        // 显式用户: user:xxx
-        return {
-          channel: "wecom-app",
-          accountId,
-          to,
-        };
-      } else {
-        // 默认为用户ID，添加 user: 前缀
-        return {
-          channel: "wecom-app",
-          accountId,
-          to: `user:${to}`,
-        };
+        return { channel: "wecom-app", accountId, to };
       }
+      if (to.startsWith("user:")) {
+        return { channel: "wecom-app", accountId, to };
+      }
+
+      // 默认为用户ID，添加 user: 前缀
+      return { channel: "wecom-app", accountId, to: `user:${to}` };
     },
   },
 
