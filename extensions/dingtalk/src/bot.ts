@@ -16,7 +16,6 @@ import {
   downloadDingTalkFile,
   parseRichTextMessage,
   downloadRichTextImages,
-  processLocalImagesInMarkdown,
   cleanupFile,
   type DownloadedFile,
   type ExtractedFileInfo,
@@ -24,95 +23,16 @@ import {
 } from "./media.js";
 import { getAccessToken } from "./client.js";
 import { createAICard, streamAICard, finishAICard, type AICardInstance } from "./card.js";
-import { createLogger, type Logger, checkDmPolicy, checkGroupPolicy, resolveFileCategory } from "@openclaw-china/shared";
-
-const NON_IMAGE_EXTENSIONS = new Set([
-  "pdf",
-  "doc",
-  "docx",
-  "xls",
-  "xlsx",
-  "csv",
-  "ppt",
-  "pptx",
-  "zip",
-  "rar",
-  "7z",
-  "tar",
-  "gz",
-  "tgz",
-  "bz2",
-  "mp3",
-  "wav",
-  "ogg",
-  "m4a",
-  "mp4",
-  "mov",
-  "avi",
-  "mkv",
-  "webm",
-  "txt",
-  "md",
-  "json",
-  "xml",
-  "yaml",
-  "yml",
-]);
-
-const IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".heic",
-  ".heif",
-]);
-
-const NON_IMAGE_EXT_PATTERN = Array.from(NON_IMAGE_EXTENSIONS).join("|");
-const MARKDOWN_LINK_RE = /\[([^\]]*)\]\(([^)]+)\)/g;
-const BARE_FILE_PATH_RE = new RegExp(
-  String.raw`((?:\/(?:tmp|var|private|Users|home|root)\/[^\s'",)]+|[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+)\.(?:${NON_IMAGE_EXT_PATTERN}))`,
-  "gi"
-);
-
-function normalizeLocalPath(raw: string): string {
-  let p = raw.trim();
-  if (p.startsWith("file://")) p = p.replace("file://", "");
-  else if (p.startsWith("MEDIA:")) p = p.replace("MEDIA:", "");
-  else if (p.startsWith("attachment://")) p = p.replace("attachment://", "");
-  try {
-    p = decodeURIComponent(p);
-  } catch {
-    // ignore decode errors
-  }
-  return p;
-}
-
-function isLocalReference(raw: string): boolean {
-  if (/^https?:\/\//i.test(raw)) return false;
-  return (
-    raw.startsWith("file://") ||
-    raw.startsWith("MEDIA:") ||
-    raw.startsWith("attachment://") ||
-    raw.startsWith("/") ||
-    raw.startsWith("~") ||
-    /^[a-zA-Z]:[\\/]/.test(raw)
-  );
-}
-
-function isNonImageFilePath(localPath: string): boolean {
-  const ext = path.extname(localPath).toLowerCase().replace(/^\./, "");
-  return ext ? NON_IMAGE_EXTENSIONS.has(ext) : false;
-}
-
-function isImagePath(localPath: string): boolean {
-  const ext = path.extname(localPath).toLowerCase();
-  return ext ? IMAGE_EXTENSIONS.has(ext) : false;
-}
+import {
+  createLogger,
+  type Logger,
+  checkDmPolicy,
+  checkGroupPolicy,
+  resolveFileCategory,
+  extractMediaFromText,
+  normalizeLocalPath,
+  isImagePath,
+} from "@openclaw-china/shared";
 
 function buildGatewayUserContent(inboundCtx: InboundContext, logger: Logger): string {
   const base = inboundCtx.Body ?? "";
@@ -145,44 +65,71 @@ function buildGatewayUserContent(inboundCtx: InboundContext, logger: Logger): st
   return `${base}\n\n[local files]\n${list}`;
 }
 
-function extractLocalFilesFromText(params: {
+/**
+ * 从文本中提取本地媒体路径（图片/文件），但不修改原始文本
+ */
+function extractLocalMediaFromText(params: {
   text: string;
   logger?: Logger;
-}): { text: string; files: string[] } {
+}): { mediaUrls: string[] } {
   const { text, logger } = params;
-  const files = new Map<string, string>();
-  let result = text;
 
-  const registerFile = (localPath: string): string => {
-    if (!files.has(localPath)) {
-      files.set(localPath, path.basename(localPath));
-    }
-    return `[文件: ${path.basename(localPath)}]`;
-  };
-
-  result = result.replace(MARKDOWN_LINK_RE, (match, _label, rawPath, offset, fullText) => {
-    if (offset > 0 && fullText[offset - 1] === "!") return match;
-    if (!isLocalReference(rawPath)) return match;
-    const localPath = normalizeLocalPath(rawPath);
-    if (!isNonImageFilePath(localPath)) return match;
-    if (!fs.existsSync(localPath)) {
-      logger?.warn?.(`[stream] local file not found: ${localPath}`);
-      return match;
-    }
-    return registerFile(localPath);
+  const result = extractMediaFromText(text, {
+    removeFromText: false,
+    checkExists: true,
+    existsSync: (p: string) => {
+      const exists = fs.existsSync(p);
+      if (!exists) {
+        logger?.warn?.(`[stream] local media not found: ${p}`);
+      }
+      return exists;
+    },
+    parseMediaLines: false,
+    parseMarkdownImages: true,
+    parseHtmlImages: false, // 钉钉不支持 HTML
+    parseBarePaths: true,
+    parseMarkdownLinks: true,
   });
 
-  result = result.replace(BARE_FILE_PATH_RE, (match, rawPath) => {
-    const localPath = normalizeLocalPath(rawPath);
-    if (!isNonImageFilePath(localPath)) return match;
-    if (!fs.existsSync(localPath)) {
-      logger?.warn?.(`[stream] local file not found: ${localPath}`);
-      return match;
-    }
-    return registerFile(localPath);
+  const mediaUrls = result.all
+    .filter((m) => m.isLocal && m.localPath)
+    .map((m) => m.localPath as string);
+
+  return { mediaUrls };
+}
+
+/**
+ * 从文本中提取行首 MEDIA: 指令（支持 file:// / 绝对路径 / URL）
+ * 使用 shared 模块的 extractMediaFromText 实现
+ */
+function extractMediaLinesFromText(params: {
+  text: string;
+  logger?: Logger;
+}): { text: string; mediaUrls: string[] } {
+  const { text, logger } = params;
+
+  const result = extractMediaFromText(text, {
+    removeFromText: false,
+    checkExists: true,
+    existsSync: (p: string) => {
+      const exists = fs.existsSync(p);
+      if (!exists) {
+        logger?.warn?.(`[stream] local media not found: ${p}`);
+      }
+      return exists;
+    },
+    parseMediaLines: true,
+    parseMarkdownImages: false,
+    parseHtmlImages: false,
+    parseBarePaths: false,
+    parseMarkdownLinks: false,
   });
 
-  return { text: result, files: Array.from(files.keys()) };
+  const mediaUrls = result.all
+    .map((m) => (m.isLocal ? m.localPath ?? m.source : m.source))
+    .filter((m): m is string => typeof m === "string" && m.trim().length > 0);
+
+  return { text: result.text, mediaUrls };
 }
 
 function resolveGatewayAuthFromConfigFile(logger: Logger): string | undefined {
@@ -307,12 +254,12 @@ async function* streamFromGateway(params: {
           const now = Date.now();
 
           // 检测时间间隔，判断是否为任务边界（跳过第一个 chunk）
-          if (lastChunkTime !== null) {
-            const timeSinceLastChunk = now - lastChunkTime;
-            if (timeSinceLastChunk > TASK_BOUNDARY_THRESHOLD_MS) {
-              yield "\n\n──────────\n\n";
+            if (lastChunkTime !== null) {
+              const timeSinceLastChunk = now - lastChunkTime;
+              if (timeSinceLastChunk > TASK_BOUNDARY_THRESHOLD_MS) {
+                yield "\n\n";
+              }
             }
-          }
 
           yield content;
           lastChunkTime = now;
@@ -516,16 +463,13 @@ async function handleAICardStreaming(params: {
   targetId: string;
   chatType: "direct" | "group";
   logger: Logger;
-}): Promise<void> {
-  const { card, cfg, route, inboundCtx, dingtalkCfg, targetId, chatType, logger } = params;
-  let accumulated = "";
-  const imageCache = new Map<string, string>();
-  const streamedFiles = new Set<string>();
-  const streamStartAt = Date.now();
-  const streamStartIso = new Date(streamStartAt).toISOString();
-  let firstChunkAt: number | null = null;
-  let chunkCount = 0;
-  let lastChunkLogAt = 0;
+  }): Promise<void> {
+    const { card, cfg, route, inboundCtx, dingtalkCfg, targetId, chatType, logger } = params;
+    let accumulated = "";
+    const streamStartAt = Date.now();
+    const streamStartIso = new Date(streamStartAt).toISOString();
+    let firstChunkAt: number | null = null;
+    let chunkCount = 0;
 
   try {
     const core = getDingtalkRuntime();
@@ -559,76 +503,57 @@ async function handleAICardStreaming(params: {
         logger.debug(
           `[stream] first chunk at ${firstChunkIso} (after ${firstChunkAt - streamStartAt}ms, len=${chunk.length}, start=${streamStartIso})`
         );
-      } else {
-        const nowLog = Date.now();
-        if (nowLog - lastChunkLogAt >= 1000) {
-          logger.debug(
-            `[stream] chunks=${chunkCount} totalLen=${accumulated.length} dt=${nowLog - streamStartAt}ms`
-          );
-          lastChunkLogAt = nowLog;
-        }
       }
       const now = Date.now();
-      if (!firstFrameSent || now - lastUpdateTime >= updateInterval) {
-        const withImages = await processLocalImagesInMarkdown({
-          text: accumulated,
-          cfg: dingtalkCfg,
-          log: logger,
-          cache: imageCache,
-        });
-        const { text: rendered, files } = extractLocalFilesFromText({
-          text: withImages,
-          logger,
-        });
-        for (const filePath of files) {
-          streamedFiles.add(filePath);
-        }
-        await streamAICard(card, rendered, false, (msg) => logger.debug(msg));
-        lastUpdateTime = now;
-        firstFrameSent = true;
-        const pushIso = new Date(now).toISOString();
-        logger.debug(
-          `[stream] pushed update at ${pushIso} (len=${accumulated.length}, dt=${now - streamStartAt}ms, start=${streamStartIso})`
-        );
-      }
-    }
-
-    const withImages = await processLocalImagesInMarkdown({
-      text: accumulated,
-      cfg: dingtalkCfg,
-      log: logger,
-      cache: imageCache,
-    });
-    const { text: finalText, files: finalFiles } = extractLocalFilesFromText({
-      text: withImages,
-      logger,
-    });
-    for (const filePath of finalFiles) {
-      streamedFiles.add(filePath);
-    }
-
-    // 完成卡片
-    await finishAICard(card, finalText, (msg) => logger.debug(msg));
-    logger.info(`AI Card streaming completed with ${accumulated.length} chars`);
-
-    // 单独发送文件消息（非图片）
-    if (streamedFiles.size > 0) {
-      logger.debug(`[stream] sending ${streamedFiles.size} files separately`);
-      for (const filePath of streamedFiles) {
-        try {
-          await sendMediaDingtalk({
-            cfg: dingtalkCfg,
-            to: targetId,
-            mediaUrl: filePath,
-            chatType,
-          });
-          logger.debug(`[stream] sent file: ${filePath}`);
-        } catch (fileErr) {
-          logger.warn(`[stream] failed to send file ${filePath}: ${String(fileErr)}`);
+        if (!firstFrameSent || now - lastUpdateTime >= updateInterval) {
+          await streamAICard(card, accumulated, false);
+          lastUpdateTime = now;
+          firstFrameSent = true;
         }
       }
-    }
-  } catch (err) {
+
+      // 完成卡片
+      await finishAICard(card, accumulated, (msg) => logger.debug(msg));
+      logger.info(`AI Card streaming completed with ${accumulated.length} chars`);
+
+      const { mediaUrls: mediaFromLines } = extractMediaLinesFromText({
+        text: accumulated,
+        logger,
+      });
+      const { mediaUrls: localMediaFromText } = extractLocalMediaFromText({
+        text: accumulated,
+        logger,
+      });
+      const mediaQueue: string[] = [];
+      const seenMedia = new Set<string>();
+      const addMedia = (value?: string) => {
+        const trimmed = value?.trim();
+        if (!trimmed) return;
+        if (seenMedia.has(trimmed)) return;
+        seenMedia.add(trimmed);
+        mediaQueue.push(trimmed);
+      };
+      for (const url of mediaFromLines) addMedia(url);
+      for (const url of localMediaFromText) addMedia(url);
+
+      // 单独发送媒体消息（图片/文件）
+      if (mediaQueue.length > 0) {
+        logger.debug(`[stream] sending ${mediaQueue.length} media attachments`);
+        for (const mediaUrl of mediaQueue) {
+          try {
+            await sendMediaDingtalk({
+              cfg: dingtalkCfg,
+              to: targetId,
+              mediaUrl,
+              chatType,
+            });
+            logger.debug(`[stream] sent media: ${mediaUrl}`);
+          } catch (fileErr) {
+            logger.warn(`[stream] failed to send media ${mediaUrl}: ${String(fileErr)}`);
+          }
+        }
+      }
+    } catch (err) {
     logger.error(`AI Card streaming failed: ${String(err)}`);
     // 尝试用错误信息完成卡片
     try {
@@ -639,42 +564,50 @@ async function handleAICardStreaming(params: {
     }
 
     // 回退到普通消息发送（使用钉钉 SDK）
-    try {
-      const fallbackText = accumulated.trim()
-        ? accumulated
-        : `⚠️ Response interrupted: ${String(err)}`;
-      const processedFallback = await processLocalImagesInMarkdown({
-        text: fallbackText,
-        cfg: dingtalkCfg,
-        log: logger,
-      });
-      const { text: cleanedFallback, files: localFiles } = extractLocalFilesFromText({
-        text: processedFallback,
-        logger,
-      });
-      const limit = dingtalkCfg.textChunkLimit ?? 4000;
-      for (let i = 0; i < cleanedFallback.length; i += limit) {
-        const chunk = cleanedFallback.slice(i, i + limit);
-        await sendMessageDingtalk({
-          cfg: dingtalkCfg,
-          to: targetId,
-          text: chunk,
-          chatType,
-        });
-      }
-      if (localFiles.length > 0) {
-        const uniqueFiles = Array.from(new Set(localFiles));
-        for (const filePath of uniqueFiles) {
-          await sendMediaDingtalk({
+      try {
+        const fallbackText = accumulated.trim()
+          ? accumulated
+          : `⚠️ Response interrupted: ${String(err)}`;
+        const limit = dingtalkCfg.textChunkLimit ?? 4000;
+        for (let i = 0; i < fallbackText.length; i += limit) {
+          const chunk = fallbackText.slice(i, i + limit);
+          await sendMessageDingtalk({
             cfg: dingtalkCfg,
             to: targetId,
-            mediaUrl: filePath,
+            text: chunk,
             chatType,
           });
         }
-      }
-      logger.info("AI Card failed; fallback message sent via SDK");
-    } catch (fallbackErr) {
+        const { mediaUrls: mediaFromLines } = extractMediaLinesFromText({
+          text: fallbackText,
+          logger,
+        });
+        const { mediaUrls: localMediaFromText } = extractLocalMediaFromText({
+          text: fallbackText,
+          logger,
+        });
+        const mediaQueue: string[] = [];
+        const seenMedia = new Set<string>();
+        const addMedia = (value?: string) => {
+          const trimmed = value?.trim();
+          if (!trimmed) return;
+          if (seenMedia.has(trimmed)) return;
+          seenMedia.add(trimmed);
+          mediaQueue.push(trimmed);
+        };
+        for (const url of mediaFromLines) addMedia(url);
+        for (const url of localMediaFromText) addMedia(url);
+        for (const mediaUrl of mediaQueue) {
+          await sendMediaDingtalk({
+            cfg: dingtalkCfg,
+            to: targetId,
+            mediaUrl,
+            chatType,
+          });
+        }
+
+        logger.info("AI Card failed; fallback message sent via SDK");
+      } catch (fallbackErr) {
       logger.error(`Failed to send fallback message: ${String(fallbackErr)}`);
     }
   }
@@ -1088,7 +1021,10 @@ export async function handleDingtalkMessage(params: {
     const chunkMode = (textApi?.resolveChunkMode as ((cfg: unknown, channel: string) => unknown) | undefined)?.(cfg, "dingtalk");
     const tableMode = "bullets";
 
-    const deliver = async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
+    const deliver = async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info?: { kind?: string }) => {
+      if (replyFinalOnly && (!info || info.kind !== "final")) {
+        return false;
+      }
       logger.debug(
         `[reply] payload=${JSON.stringify({
           hasText: typeof payload.text === "string",
@@ -1099,72 +1035,94 @@ export async function handleDingtalkMessage(params: {
       );
       const targetId = isGroup ? ctx.conversationId : ctx.senderId;
       const chatType = isGroup ? "group" : "direct";
+      let sent = false;
 
-      const mediaUrls = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
-      if (mediaUrls.length > 0) {
-        for (const mediaUrl of mediaUrls) {
+      const sendMediaWithFallback = async (mediaUrl: string): Promise<void> => {
+        try {
           await sendMediaDingtalk({
             cfg: dingtalkCfgResolved,
             to: targetId,
             mediaUrl,
             chatType,
           });
+          sent = true;
+        } catch (err) {
+          logger.error(`[reply] sendMediaDingtalk failed: ${String(err)}`);
+          const fallbackText = `📎 ${mediaUrl}`;
+          await sendMessageDingtalk({
+            cfg: dingtalkCfgResolved,
+            to: targetId,
+            text: fallbackText,
+            chatType,
+          });
+          sent = true;
         }
-        return;
-      }
+      };
 
+      const payloadMediaUrls = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
       const rawText = payload.text ?? "";
-      if (!rawText.trim()) return;
-      
+      const { mediaUrls: mediaFromLines } = extractMediaLinesFromText({
+        text: rawText,
+        logger,
+      });
+      const { mediaUrls: localMediaFromText } = extractLocalMediaFromText({
+        text: rawText,
+        logger,
+      });
+
+      const mediaQueue: string[] = [];
+      const seenMedia = new Set<string>();
+      const addMedia = (value?: string) => {
+        const trimmed = value?.trim();
+        if (!trimmed) return;
+        if (seenMedia.has(trimmed)) return;
+        seenMedia.add(trimmed);
+        mediaQueue.push(trimmed);
+      };
+
+      for (const url of payloadMediaUrls) addMedia(url);
+      for (const url of mediaFromLines) addMedia(url);
+      for (const url of localMediaFromText) addMedia(url);
+
       const converted = (textApi?.convertMarkdownTables as ((text: string, mode: string) => string) | undefined)?.(
         rawText,
         tableMode
       ) ?? rawText;
 
-      const processed = await processLocalImagesInMarkdown({
-        text: converted,
-        cfg: dingtalkCfgResolved,
-        log: logger,
-      });
+      const hasText = converted.trim().length > 0;
+      if (hasText) {
+        const chunks =
+          textApi?.chunkTextWithMode && typeof textChunkLimitResolved === "number" && textChunkLimitResolved > 0
+            ? (textApi.chunkTextWithMode as (text: string, limit: number, mode: unknown) => string[])(converted, textChunkLimitResolved, chunkMode)
+            : [converted];
 
-      const { text: cleanedText, files: localFiles } = extractLocalFilesFromText({
-        text: processed,
-        logger,
-      });
-      
-      const chunks =
-        textApi?.chunkTextWithMode && typeof textChunkLimitResolved === "number" && textChunkLimitResolved > 0
-          ? (textApi.chunkTextWithMode as (text: string, limit: number, mode: unknown) => string[])(cleanedText, textChunkLimitResolved, chunkMode)
-          : [cleanedText];
-
-      for (const chunk of chunks) {
-        await sendMessageDingtalk({
-          cfg: dingtalkCfgResolved,
-          to: targetId,
-          text: chunk,
-          chatType,
-        });
-      }
-
-      if (localFiles.length > 0) {
-        const uniqueFiles = Array.from(new Set(localFiles));
-        for (const filePath of uniqueFiles) {
-          await sendMediaDingtalk({
+        for (const chunk of chunks) {
+          await sendMessageDingtalk({
             cfg: dingtalkCfgResolved,
             to: targetId,
-            mediaUrl: filePath,
+            text: chunk,
             chatType,
           });
+          sent = true;
         }
       }
+
+      for (const mediaUrl of mediaQueue) {
+        await sendMediaWithFallback(mediaUrl);
+      }
+
+      if (!hasText && mediaQueue.length === 0) {
+        return false;
+      }
+      return sent;
     };
 
+    const replyFinalOnly = dingtalkCfgResolved.replyFinalOnly !== false;
     const deliverFinalOnly = async (
       payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] },
       info?: { kind?: string }
-    ) => {
-      if (!info || info.kind !== "final") return;
-      await deliver(payload);
+    ): Promise<boolean> => {
+      return await deliver(payload, info);
     };
 
     const humanDelay = (replyApi?.resolveHumanDelayConfig as ((cfg: unknown, agentId?: string) => unknown) | undefined)?.(
@@ -1178,6 +1136,97 @@ export async function handleDingtalkMessage(params: {
     const createDispatcher = replyApi?.createReplyDispatcher as
       | ((opts: Record<string, unknown>) => Record<string, unknown>)
       | undefined;
+
+    const dispatchReplyWithBufferedBlockDispatcher = replyApi?.dispatchReplyWithBufferedBlockDispatcher as
+      | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
+      | undefined;
+
+    if (dispatchReplyWithBufferedBlockDispatcher) {
+      logger.debug(`dispatching to agent (buffered, session=${(route as Record<string, unknown>)?.sessionKey})`);
+      const deliveryState = { delivered: false, skippedNonSilent: 0 };
+      const buffered = {
+        lastText: "",
+        mediaUrls: [] as string[],
+        hasPayload: false,
+      };
+      const addBufferedMedia = (value?: string) => {
+        const trimmed = value?.trim();
+        if (!trimmed) return;
+        if (buffered.mediaUrls.includes(trimmed)) return;
+        buffered.mediaUrls.push(trimmed);
+      };
+      const result = await dispatchReplyWithBufferedBlockDispatcher({
+        ctx: finalCtx,
+        cfg,
+        dispatcherOptions: {
+          deliver: async (payload: unknown, info?: { kind?: string }) => {
+            if (!replyFinalOnly) {
+              const didSend = await deliverFinalOnly(
+                payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] },
+                info
+              );
+              if (didSend) {
+                deliveryState.delivered = true;
+              }
+              return;
+            }
+
+            if (!info || info.kind !== "final") {
+              return;
+            }
+
+            const typed = payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] };
+            buffered.hasPayload = true;
+            if (typeof typed.text === "string" && typed.text.trim()) {
+              buffered.lastText = typed.text;
+            }
+            if (Array.isArray(typed.mediaUrls)) {
+              for (const url of typed.mediaUrls) addBufferedMedia(url);
+            } else if (typed.mediaUrl) {
+              addBufferedMedia(typed.mediaUrl);
+            }
+          },
+          humanDelay,
+          onSkip: (_payload: unknown, info: { kind: string; reason: string }) => {
+            if (info.reason !== "silent") {
+              deliveryState.skippedNonSilent += 1;
+            }
+          },
+          onError: (err: unknown, info: { kind: string }) => {
+            logger.error(`${info.kind} reply failed: ${String(err)}`);
+          },
+        },
+      });
+
+      if (buffered.hasPayload) {
+        const didSend = await deliver(
+          {
+            text: buffered.lastText,
+            mediaUrls: buffered.mediaUrls.length ? buffered.mediaUrls : undefined,
+          },
+          { kind: "final" }
+        );
+        if (didSend) {
+          deliveryState.delivered = true;
+        }
+      }
+
+      if (!deliveryState.delivered && deliveryState.skippedNonSilent > 0) {
+        await sendMessageDingtalk({
+          cfg: dingtalkCfgResolved,
+          to: isGroup ? ctx.conversationId : ctx.senderId,
+          text: "No response generated. Please try again.",
+          chatType: isGroup ? "group" : "direct",
+        });
+      }
+
+      const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
+      const queuedFinal = (result as Record<string, unknown>)?.queuedFinal as unknown;
+      logger.debug(
+        `dispatch complete (queuedFinal=${typeof queuedFinal === "boolean" ? queuedFinal : "unknown"}, replies=${counts?.final ?? 0})`
+      );
+      return;
+    }
 
     const dispatcherResult = createDispatcherWithTyping
       ? createDispatcherWithTyping({
