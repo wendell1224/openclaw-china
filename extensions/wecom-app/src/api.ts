@@ -321,20 +321,34 @@ function getMimeType(filename: string, contentType?: string): string {
 }
 
 /**
- * 下载图片
- * @param imageUrl 图片 URL
+ * 下载图片（支持网络 URL 和本地文件路径）
+ * @param imageUrl 图片 URL 或本地文件路径
  * @returns 图片 Buffer
  */
 export async function downloadImage(imageUrl: string): Promise<{ buffer: Buffer; contentType?: string }> {
-  const resp = await fetch(imageUrl);
-  if (!resp.ok) {
-    throw new Error(`Download image failed: HTTP ${resp.status}`);
+  // 判断是网络 URL 还是本地路径
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    // 网络下载
+    console.log(`[wecom-app] Using HTTP fetch to download: ${imageUrl}`);
+    const resp = await fetch(imageUrl);
+    if (!resp.ok) {
+      throw new Error(`Download image failed: HTTP ${resp.status}`);
+    }
+    const arrayBuffer = await resp.arrayBuffer();
+    return {
+      buffer: Buffer.from(arrayBuffer),
+      contentType: resp.headers.get('content-type') || undefined,
+    };
+  } else {
+    // 本地文件读取
+    console.log(`[wecom-app] Using fs to read local file: ${imageUrl}`);
+    const fs = await import('fs');
+    const buffer = await fs.promises.readFile(imageUrl);
+    return {
+      buffer,
+      contentType: undefined, // 本地文件不提供 Content-Type，依赖扩展名推断
+    };
   }
-  const arrayBuffer = await resp.arrayBuffer();
-  return {
-    buffer: Buffer.from(arrayBuffer),
-    contentType: resp.headers.get('content-type') || undefined,
-  };
 }
 
 /**
