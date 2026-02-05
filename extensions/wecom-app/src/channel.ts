@@ -251,14 +251,13 @@ export const wecomAppPlugin = {
       if (raw.startsWith("wecom-app:")) return true;
 
       // 不以其他 channel 前缀开头（如 dingtalk:, feishu: 等）
-      // 只接受 wecom-app 专有目标或裸 ID
       const knownChannelPrefixes = ["dingtalk:", "feishu:", "wecom:", "qq:", "telegram:", "discord:", "slack:"];
       for (const prefix of knownChannelPrefixes) {
         if (raw.startsWith(prefix)) return false;
       }
 
-      // user:/group: 前缀或裸 ID 都可以处理
-      return true;
+      // 只接受 user: 或 group: 前缀的格式，拒绝裸 ID
+      return raw.startsWith("user:") || raw.startsWith("group:");
     },
 
     /**
@@ -276,11 +275,9 @@ export const wecomAppPlugin = {
       // NOTE:
       // The OpenClaw message routing layer may pass targets in different shapes:
       // - "wecom-app:user:xxx" or "wecom-app:group:xxx" (fully-qualified with type)
-      // - "wecom-app:xxx" (fully-qualified, default to user)
       // - "user:xxx" or "group:xxx" (type-prefixed, bare)
-      // - "xxx" (bare ID, default to user)
       // - "xxx@accountId" (with account selector)
-      // We accept all to avoid "Unknown target" for media sends.
+      // We NO LONGER accept bare IDs (e.g., "xxx") to avoid ambiguity.
 
       let raw = (params.target ?? "").trim();
       if (!raw) return null;
@@ -306,7 +303,7 @@ export const wecomAppPlugin = {
         }
       }
 
-      // 3. 标准化目标格式
+      // 3. 验证目标格式（必须包含 user: 或 group: 前缀）
       if (to.startsWith("group:")) {
         return { channel: "wecom-app", accountId, to };
       }
@@ -314,8 +311,9 @@ export const wecomAppPlugin = {
         return { channel: "wecom-app", accountId, to };
       }
 
-      // 4. 默认为用户ID，添加 user: 前缀
-      return { channel: "wecom-app", accountId, to: `user:${to}` };
+      // 4. 不支持裸 ID 格式，返回 null
+      // 这将导致 OpenClaw 报错 "Unknown target"，提示用户使用正确的格式
+      return null;
     },
 
     /**
@@ -356,10 +354,8 @@ export const wecomAppPlugin = {
     getTargetFormats: (): string[] => [
       "wecom-app:user:<userId>",
       "wecom-app:group:<chatId>",
-      "wecom-app:<userId>",
       "user:<userId>",
       "group:<chatId>",
-      "<userId>",
     ],
   },
 
