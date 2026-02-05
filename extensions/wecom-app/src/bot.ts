@@ -376,16 +376,18 @@ export async function dispatchWecomAppMessage(params: {
   const msgid = msg.msgid ?? msg.MsgId ?? undefined;
 
   // 构建标准化的目标标识，用于自动回复到当前会话
-  // - 私聊：回复到发送者 user:senderId
-  const normalizedTarget = `wecom-app:user:${senderId}`;
+  // - From: 带渠道前缀，用于标识来源渠道
+  // - To: 不带渠道前缀，只带类型前缀，用于回复时路由
+  const from = `wecom-app:user:${senderId}`;
+  const to = `user:${senderId}`;
 
   const ctxPayload = (channel.reply?.finalizeInboundContext
     ? channel.reply.finalizeInboundContext({
         Body: body,
         RawBody: rawBody,
         CommandBody: rawBody,
-        From: normalizedTarget,
-        To: normalizedTarget,
+        From: from,
+        To: to,
         SessionKey: route.sessionKey,
         AccountId: route.accountId,
         ChatType: "direct",
@@ -396,14 +398,14 @@ export async function dispatchWecomAppMessage(params: {
         Surface: "wecom-app",
         MessageSid: msgid,
         OriginatingChannel: "wecom-app",
-        OriginatingTo: normalizedTarget,
+        OriginatingTo: to,
       })
     : {
         Body: body,
         RawBody: rawBody,
         CommandBody: rawBody,
-        From: normalizedTarget,
-        To: normalizedTarget,
+        From: from,
+        To: to,
         SessionKey: route.sessionKey,
         AccountId: route.accountId,
         ChatType: "direct",
@@ -414,7 +416,7 @@ export async function dispatchWecomAppMessage(params: {
         Surface: "wecom-app",
         MessageSid: msgid,
         OriginatingChannel: "wecom-app",
-        OriginatingTo: normalizedTarget,
+        OriginatingTo: to,
       }) as {
     SessionKey?: string;
     [key: string]: unknown;
