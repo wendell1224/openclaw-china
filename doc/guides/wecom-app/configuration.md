@@ -539,6 +539,11 @@ cp -a ~/.openclaw/extensions/openclaw-china/extensions/wecom-app/skills/wecom-ap
   - `user:<id>` / `group:<id>`
   - 裸 id（默认当 user）
   - `xxx@accountId`（带账号选择）
+- **自动回复到当前会话**：
+  - 私聊消息：`message.send({ text: "..." })` 自动回复到发送者
+  - 群聊消息：`message.send({ text: "..." })` 自动回复到群聊
+  - 无需每次指定 `target` 参数
+  - 仍可通过 `target` 参数显式指定其他接收者
 
 ### 多账号与策略
 

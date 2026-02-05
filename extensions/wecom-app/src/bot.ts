@@ -409,6 +409,13 @@ export async function dispatchWecomAppMessage(params: {
 
   const msgid = msg.msgid ?? msg.MsgId ?? undefined;
 
+  // 构建 replyTo 字段，用于自动回复到当前会话
+  // - 私聊：回复到发送者 user:senderId
+  // - 群聊：回复到群聊 group:chatId
+  const replyTo = chatType === "group"
+    ? `wecom-app:group:${chatId}`
+    : `wecom-app:user:${senderId}`;
+
   const ctxPayload = (channel.reply?.finalizeInboundContext
     ? channel.reply.finalizeInboundContext({
         Body: body,
@@ -416,6 +423,7 @@ export async function dispatchWecomAppMessage(params: {
         CommandBody: rawBody,
         From: chatType === "group" ? `wecom-app:group:${chatId}` : `wecom-app:${senderId}`,
         To: `wecom-app:${chatId}`,
+        replyTo,
         SessionKey: route.sessionKey,
         AccountId: route.accountId,
         ChatType: chatType,
@@ -434,6 +442,7 @@ export async function dispatchWecomAppMessage(params: {
         CommandBody: rawBody,
         From: chatType === "group" ? `wecom-app:group:${chatId}` : `wecom-app:${senderId}`,
         To: `wecom-app:${chatId}`,
+        replyTo,
         SessionKey: route.sessionKey,
         AccountId: route.accountId,
         ChatType: chatType,
