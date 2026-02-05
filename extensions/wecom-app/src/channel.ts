@@ -11,8 +11,6 @@ import {
   resolveDefaultWecomAppAccountId,
   resolveWecomAppAccount,
   resolveAllowFrom,
-  resolveGroupAllowFrom,
-  resolveRequireMention,
   WecomAppConfigJsonSchema,
   type PluginConfig,
 } from "./config.js";
@@ -106,7 +104,7 @@ export const wecomAppPlugin = {
   },
 
   capabilities: {
-    chatTypes: ["direct", "group"] as const,
+    chatTypes: ["direct"] as const,
     media: true,
     reactions: false,
     threads: false,
@@ -215,26 +213,13 @@ export const wecomAppPlugin = {
         .map((entry) => entry.toLowerCase()),
   },
 
-  groups: {
-    resolveRequireMention: (params: {
-      cfg: PluginConfig;
-      accountId?: string;
-      account?: ResolvedWecomAppAccount;
-    }): boolean => {
-      const account = params.account ?? resolveWecomAppAccount({ cfg: params.cfg ?? {}, accountId: params.accountId });
-      return resolveRequireMention(account.config);
-    },
-  },
-
   /**
    * 目录解析 - 用于将 wecom-app:XXX 格式的 target 解析为可投递目标
    *
    * 支持的输入格式：
    * - "wecom-app:user:xxx" → { channel: "wecom-app", to: "user:xxx" }
-   * - "wecom-app:group:xxx" → { channel: "wecom-app", to: "group:xxx" }
    * - "wecom-app:xxx" → { channel: "wecom-app", to: "user:xxx" }
    * - "user:xxx" → { channel: "wecom-app", to: "user:xxx" }
-   * - "group:xxx" → { channel: "wecom-app", to: "group:xxx" }
    * - "xxx" (裸ID) → { channel: "wecom-app", to: "user:xxx" }
    * - 带 accountId: "user:xxx@account1" → { channel: "wecom-app", accountId: "account1", to: "user:xxx" }
    */
@@ -263,6 +248,13 @@ export const wecomAppPlugin = {
     /**
      * 解析单个目标地址
      * 将各种格式的 target 解析为可用的投递对象
+     * 
+     * IMPORTANT: 返回的 `to` 字段必须是纯 ID（不含 user:/group: 前缀），
+     * 因为 OpenClaw 框架会用这个值来匹配 inbound context 中的 From/To 字段。
+     * 
+     * 例如：如果 inbound context 的 From 是 "wecom-app:user:CaiHongYu"，
+     * 那么 resolveTarget 必须返回 { channel: "wecom-app", to: "CaiHongYu" }，
+     * 而不是 { channel: "wecom-app", to: "user:CaiHongYu" }。
      */
     resolveTarget: (params: {
       cfg: PluginConfig;
@@ -276,9 +268,9 @@ export const wecomAppPlugin = {
       // The OpenClaw message routing layer may pass targets in different shapes:
       // - "wecom-app:user:xxx" or "wecom-app:group:xxx" (fully-qualified with type)
       // - "user:xxx" or "group:xxx" (type-prefixed, bare)
-      // - "xxx" (bare ID, auto-converted to "user:xxx" for Agent compatibility)
+      // - "xxx" (bare ID, auto-converted to user for Agent compatibility)
       // - "xxx@accountId" (with account selector)
-      // We accept bare IDs and auto-convert them to "user:xxx" to support Agent behavior.
+      // We accept bare IDs and treat them as user IDs for Agent compatibility.
 
       let raw = (params.target ?? "").trim();
       if (!raw) return null;
@@ -304,18 +296,17 @@ export const wecomAppPlugin = {
         }
       }
 
-      // 3. 验证目标格式（必须包含 user: 或 group: 前缀）
+      // 3. 剥离 user: 或 group: 前缀，返回纯 ID
+      // 这样框架才能正确匹配 inbound context 中的 From/To 字段
       if (to.startsWith("group:")) {
-        return { channel: "wecom-app", accountId, to };
+        return { channel: "wecom-app", accountId, to: to.slice(6) };
       }
       if (to.startsWith("user:")) {
-        return { channel: "wecom-app", accountId, to };
+        return { channel: "wecom-app", accountId, to: to.slice(5) };
       }
 
-      // 4. 兼容裸 ID 格式（自动添加 user: 前缀）
-      // 注意：这是为了兼容 Agent 可能发送的裸 ID 格式
-      // 建议在 Agent 系统提示中明确要求使用 user: 或 group: 前缀
-      return { channel: "wecom-app", accountId, to: `user:${to}` };
+      // 4. 裸 ID 格式（直接返回，默认当作用户 ID）
+      return { channel: "wecom-app", accountId, to };
     },
 
     /**
@@ -352,13 +343,14 @@ export const wecomAppPlugin = {
     /**
      * 获取此通道支持的目标格式说明
      * 用于帮助信息和错误提示
+     * 
+     * 注意：虽然支持多种输入格式，但 resolveTarget 返回的 `to` 字段
+     * 始终是纯 ID（不含前缀），以便框架正确匹配 inbound context。
      */
     getTargetFormats: (): string[] => [
       "wecom-app:user:<userId>",
-      "wecom-app:group:<chatId>",
       "user:<userId>",
-      "group:<chatId>",
-      "<userId>",  // 裸 ID 会自动转换为 user:<userId>
+      "<userId>",  // 裸 ID，默认当作用户 ID
     ],
   },
 
@@ -394,7 +386,7 @@ export const wecomAppPlugin = {
         };
       }
 
-      // 解析 to: 支持格式 "wecom-app:user:xxx" / "wecom-app:group:xxx" / "wecom-app:xxx" / "user:xxx" / "group:xxx" / "xxx"
+      // 解析 to: 支持格式 "wecom-app:user:xxx" / "wecom-app:xxx" / "user:xxx" / "xxx"
       let to = params.to;
 
       // 1. 先剥离 channel 前缀 "wecom-app:"
@@ -403,11 +395,9 @@ export const wecomAppPlugin = {
         to = to.slice(channelPrefix.length);
       }
 
-      // 2. 解析剩余部分: "group:xxx" / "user:xxx" / "xxx"
-      let target: { userId?: string; chatid?: string } = {};
-      if (to.startsWith("group:")) {
-        target = { chatid: to.slice(6) };
-      } else if (to.startsWith("user:")) {
+      // 2. 解析剩余部分: "user:xxx" / "xxx"
+      let target: { userId: string };
+      if (to.startsWith("user:")) {
         target = { userId: to.slice(5) };
       } else {
         target = { userId: to };
@@ -468,7 +458,7 @@ export const wecomAppPlugin = {
         };
       }
 
-      // 解析 to: 支持格式 "wecom-app:user:xxx" / "wecom-app:group:xxx" / "wecom-app:xxx" / "user:xxx" / "group:xxx" / "xxx"
+      // 解析 to: 支持格式 "wecom-app:user:xxx" / "wecom-app:xxx" / "user:xxx" / "xxx"
       let to = params.to;
 
       //1. 先剥离 channel 前缀 "wecom-app:"
@@ -477,11 +467,9 @@ export const wecomAppPlugin = {
         to = to.slice(channelPrefix.length);
       }
 
-      //2. 解析剩余部分: "group:xxx" / "user:xxx" / "xxx"
-      let target: { userId?: string; chatid?: string } = {};
-      if (to.startsWith("group:")) {
-        target = { chatid: to.slice(6) };
-      } else if (to.startsWith("user:")) {
+      //2. 解析剩余部分: "user:xxx" / "xxx"
+      let target: { userId: string };
+      if (to.startsWith("user:")) {
         target = { userId: to.slice(5) };
       } else {
         target = { userId: to };
