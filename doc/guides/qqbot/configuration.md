@@ -1,17 +1,21 @@
 # QQ 渠道配置指南
-
-本文档用于 QQ 开放平台机器人在 OpenClaw China 中的部署与配置。
-
-仓库地址：<https://github.com/BytePioneer-AI/openclaw-china>  
-
 <div align="center">
 
   <p>
     <strong>⭐ 如果这个项目对你有帮助，请给我们一个Star！⭐</strong><br>
     <em>您的支持是我们持续改进的动力</em>
   </p>
-
 </div>
+
+本文档用于 QQ 开放平台机器人在 OpenClaw China 中的部署与配置。
+
+仓库地址：<https://github.com/BytePioneer-AI/openclaw-china>  
+
+<p align="center">
+  <img src="../../images/qqbot-showcase-01.jpg" alt="QQ Bot 展示图 1" width="32%" />
+  <img src="../../images/qqbot-showcase-02.jpg" alt="QQ Bot 展示图 2" width="32%" />
+  <img src="../../images/qqbot-showcase-03.jpg" alt="QQ Bot 展示图 3" width="32%" />
+</p>
 
 ## 一、获取 QQ 机器人凭证
 
