@@ -11,6 +11,7 @@ import * as fsPromises from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { isHttpUrl, normalizeLocalPath, getExtension } from "./media-parser.js";
+import { resolveExtension } from "../file/file-utils.js";
 
 // ============================================================================
 // 类型定义
@@ -31,6 +32,22 @@ export interface MediaReadResult {
 }
 
 /**
+ * 下载并落盘到临时文件的结果
+ */
+export interface DownloadToTempFileResult {
+  /** 绝对路径 */
+  path: string;
+  /** 写入文件名 */
+  fileName: string;
+  /** MIME 类型 */
+  contentType: string;
+  /** 文件大小（字节） */
+  size: number;
+  /** 来源文件名（若可解析） */
+  sourceFileName?: string;
+}
+
+/**
  * 媒体读取选项
  */
 export interface MediaReadOptions {
@@ -40,6 +57,18 @@ export interface MediaReadOptions {
   maxSize?: number;
   /** 自定义 fetch 函数（用于依赖注入） */
   fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * 下载并落盘到临时文件的选项
+ */
+export interface DownloadToTempFileOptions extends MediaReadOptions {
+  /** 目标临时目录，默认 os.tmpdir() */
+  tempDir?: string;
+  /** 文件名前缀，默认 "media" */
+  tempPrefix?: string;
+  /** 来源文件名（优先用于扩展名推断） */
+  sourceFileName?: string;
 }
 
 /**
@@ -76,6 +105,40 @@ const DEFAULT_UNIX_PREFIXES = [
   "/home",
   "/root",
 ];
+
+function parseContentDispositionFilename(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim());
+    } catch {
+      return utf8Match[1].trim();
+    }
+  }
+  const plainMatch = value.match(/filename=([^;]+)/i);
+  if (!plainMatch?.[1]) return undefined;
+  const raw = plainMatch[1].trim().replace(/^["']|["']$/g, "");
+  return raw || undefined;
+}
+
+function sanitizeFileName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "file";
+  const normalized = trimmed.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
+  return normalized || "file";
+}
+
+function resolveFileNameFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const base = path.basename(parsed.pathname);
+    if (!base || base === "/") return undefined;
+    return base;
+  } catch {
+    return undefined;
+  }
+}
 
 /** 扩展名到 MIME 类型映射 */
 const EXT_TO_MIME: Record<string, string> = {
@@ -339,6 +402,105 @@ export async function fetchMediaFromUrl(
 }
 
 /**
+ * 下载 HTTP 媒体并写入临时文件
+ */
+export async function downloadToTempFile(
+  url: string,
+  options: DownloadToTempFileOptions = {}
+): Promise<DownloadToTempFileResult> {
+  if (!isHttpUrl(url)) {
+    throw new Error(`downloadToTempFile expects an HTTP URL, got: ${url}`);
+  }
+
+  const {
+    timeout = DEFAULT_TIMEOUT,
+    maxSize = DEFAULT_MAX_SIZE,
+    fetch: customFetch = globalThis.fetch,
+    tempDir = os.tmpdir(),
+    tempPrefix = "media",
+    sourceFileName,
+  } = options;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await customFetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      const responseBody = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}: ${responseBody}`);
+    }
+
+    const contentType =
+      response.headers.get("content-type")?.split(";")[0].trim() ||
+      "application/octet-stream";
+
+    const contentLength = response.headers.get("content-length");
+    if (contentLength) {
+      const declared = parseInt(contentLength, 10);
+      if (!Number.isNaN(declared) && declared > maxSize) {
+        throw new FileSizeLimitError(declared, maxSize);
+      }
+    }
+
+    const body = response.body;
+    if (!body) {
+      throw new Error("Response body is null");
+    }
+
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    const reader = body.getReader();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.length;
+        if (totalBytes > maxSize) {
+          reader.cancel();
+          throw new FileSizeLimitError(totalBytes, maxSize);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const sourceName =
+      sourceFileName ||
+      parseContentDispositionFilename(response.headers.get("content-disposition")) ||
+      resolveFileNameFromUrl(url) ||
+      "file";
+
+    const safePrefix = sanitizeFileName(tempPrefix) || "media";
+    const ext = resolveExtension(contentType, sourceName);
+    const random = Math.random().toString(36).slice(2, 8);
+    const fileName = `${safePrefix}-${Date.now()}-${random}${ext}`;
+    const fullPath = path.join(tempDir, fileName);
+
+    await fsPromises.mkdir(tempDir, { recursive: true });
+    const buffer = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    await fsPromises.writeFile(fullPath, buffer);
+
+    return {
+      path: fullPath,
+      fileName,
+      contentType,
+      size: totalBytes,
+      sourceFileName: sourceName,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new MediaTimeoutError(timeout);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
  * 从本地路径读取媒体
  *
  * @param filePath - 本地文件路径（支持 file://, MEDIA:, attachment:// 前缀）
@@ -420,4 +582,26 @@ export async function readMediaBatch(
     }
     return { source: sources[index], error: result.reason as Error };
   });
+}
+
+/**
+ * 安全删除文件
+ * - filePath 为空直接返回
+ * - ENOENT 视为成功
+ * - 其他错误可通过 onError 回调记录
+ */
+export async function cleanupFileSafe(
+  filePath: string | undefined,
+  onError?: (error: unknown, filePath: string) => void
+): Promise<void> {
+  if (!filePath) return;
+
+  try {
+    await fsPromises.unlink(filePath);
+  } catch (error) {
+    if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    onError?.(error, filePath);
+  }
 }
