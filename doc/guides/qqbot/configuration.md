@@ -180,7 +180,7 @@ https://cloud.tencent.com/product/asr
 说明：腾讯云 ASR 提供每月免费额度（以腾讯云控制台最新计费规则为准），额度如下：
 - 录音文件识别极速版（`asr/flash/v1`）：5 小时/月
 
-![image-20260209225153145](D:\work\code\moltbot-china\doc\images\image-20260209225153145.png)
+![qq-asr-free-quota](../../images/qq-asr-free-quota.png)
 
 ### 2. 创建 API 密钥
 
@@ -192,9 +192,9 @@ https://cloud.tencent.com/product/asr
 控制台入口：  
 https://console.cloud.tencent.com/asr
 
-![image-20260209225210645](D:\work\code\moltbot-china\doc\images\image-20260209225210645.png)
+![qq-asr-console-entry](../../images/qq-asr-console-entry.png)
 
-![image-20260209225226538](D:\work\code\moltbot-china\doc\images\image-20260209225226538.png)
+![qq-asr-api-keys](../../images/qq-asr-api-keys.png)
 
 ### 3. 在 OpenClaw 中配置
 
@@ -215,4 +215,4 @@ openclaw config set channels.qqbot.asr.secretKey your-tencent-secret-key
 
 https://cloud.tencent.com/document/product/1093/35686?from=console_document_search#58abe873-a924-4b4d-b056-59510b66c4d3
 
-![image-20260209232053703](D:\work\code\moltbot-china\doc\images\image-20260209232053703.png)
+![qq-asr-pricing-doc](../../images/qq-asr-pricing-doc.png)
