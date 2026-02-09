@@ -112,10 +112,12 @@ type ResolvedInboundAttachmentResult = {
   attachments: ResolvedInboundAttachment[];
   hasVoiceAttachment: boolean;
   hasVoiceTranscript: boolean;
+  asrErrorMessage?: string;
 };
 
 const VOICE_ASR_FALLBACK_TEXT = "当前语音功能未启动或识别失败，请稍后重试。";
 const VOICE_EXTENSIONS = [".silk", ".amr", ".mp3", ".wav", ".ogg", ".m4a", ".aac", ".speex"];
+const VOICE_ASR_ERROR_MAX_LENGTH = 500;
 
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
@@ -164,6 +166,17 @@ function scheduleTempCleanup(filePath: string): void {
   timer.unref?.();
 }
 
+function trimTextForReply(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function buildVoiceASRFallbackReply(errorMessage?: string): string {
+  const detail = errorMessage?.trim();
+  if (!detail) return VOICE_ASR_FALLBACK_TEXT;
+  return `${VOICE_ASR_FALLBACK_TEXT}\n\n接口错误：${trimTextForReply(detail, VOICE_ASR_ERROR_MAX_LENGTH)}`;
+}
+
 async function resolveInboundAttachmentsForAgent(params: {
   attachments?: QQInboundAttachment[];
   qqCfg: QQBotConfig;
@@ -176,6 +189,7 @@ async function resolveInboundAttachmentsForAgent(params: {
       attachments: [],
       hasVoiceAttachment: false,
       hasVoiceTranscript: false,
+      asrErrorMessage: undefined,
     };
   }
 
@@ -187,6 +201,7 @@ async function resolveInboundAttachmentsForAgent(params: {
   const resolved: ResolvedInboundAttachment[] = [];
   let hasVoiceAttachment = false;
   let hasVoiceTranscript = false;
+  let asrErrorMessage: string | undefined;
 
   for (const att of list) {
     const next: ResolvedInboundAttachment = { attachment: att };
@@ -241,6 +256,7 @@ async function resolveInboundAttachmentsForAgent(params: {
             logger.warn(
               `voice ASR failed: kind=${err.kind} provider=${err.provider} retryable=${err.retryable} message=${err.message}`
             );
+            asrErrorMessage ??= err.message.trim() || undefined;
           } else {
             logger.warn(`voice ASR failed: ${String(err)}`);
           }
@@ -253,6 +269,7 @@ async function resolveInboundAttachmentsForAgent(params: {
     attachments: resolved,
     hasVoiceAttachment,
     hasVoiceTranscript,
+    asrErrorMessage,
   };
 }
 
@@ -650,7 +667,7 @@ async function dispatchToAgent(params: {
     const fallback = await qqbotOutbound.sendText({
       cfg: { channels: { qqbot: qqCfg } },
       to: target.to,
-      text: VOICE_ASR_FALLBACK_TEXT,
+      text: buildVoiceASRFallbackReply(resolvedAttachmentResult.asrErrorMessage),
       replyToId: inbound.messageId,
     });
     if (fallback.error) {
